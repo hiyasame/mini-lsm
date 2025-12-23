@@ -15,9 +15,9 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
-use anyhow::Result;
-
 use super::StorageIterator;
+use crate::lsm_storage::CompactionFilter::Prefix;
+use anyhow::Result;
 
 /// Merges two iterators of different types into one. If the two iterators have the same key, only
 /// produce the key once and prefer the entry from A.
@@ -33,7 +33,26 @@ impl<
 > TwoMergeIterator<A, B>
 {
     pub fn create(a: A, b: B) -> Result<Self> {
-        unimplemented!()
+        let mut sf = Self { a, b };
+        sf.skip_b()?;
+        Ok(sf)
+    }
+
+    fn choose_a(a: &A, b: &B) -> bool {
+        if !a.is_valid() {
+            return false;
+        }
+        if !b.is_valid() {
+            return true;
+        }
+        a.key() < b.key()
+    }
+
+    fn skip_b(&mut self) -> Result<()> {
+        if self.a.is_valid() && self.b.is_valid() && self.b.key() == self.a.key() {
+            self.b.next()?;
+        }
+        Ok(())
     }
 }
 
@@ -45,18 +64,32 @@ impl<
     type KeyType<'a> = A::KeyType<'a>;
 
     fn key(&self) -> Self::KeyType<'_> {
-        unimplemented!()
+        if Self::choose_a(&self.a, &self.b) {
+            self.a.key()
+        } else {
+            self.b.key()
+        }
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        if Self::choose_a(&self.a, &self.b) {
+            self.a.value()
+        } else {
+            self.b.value()
+        }
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.a.is_valid() || self.b.is_valid()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        if Self::choose_a(&self.a, &self.b) {
+            self.a.next()?;
+        } else {
+            self.b.next()?;
+        }
+        self.skip_b()?;
+        Ok(())
     }
 }
