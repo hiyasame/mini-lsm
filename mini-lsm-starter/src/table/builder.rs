@@ -19,8 +19,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::{BlockMeta, FileObject, SsTable};
-use crate::block::Block;
-use crate::key::{Key, KeyBytes, KeyVec};
+use crate::key::KeyVec;
 use crate::{block::BlockBuilder, key::KeySlice, lsm_storage::BlockCache};
 use anyhow::Result;
 use bytes::BufMut;

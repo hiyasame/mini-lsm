@@ -16,12 +16,12 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use std::collections::HashMap;
-use std::ops::Bound;
+use std::ops::{Bound, Deref};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
@@ -36,9 +36,9 @@ use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::key::KeySlice;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
-use crate::mem_table::{MemTable, MemTableIterator, map_bound};
+use crate::mem_table::{MemTable, map_bound};
 use crate::mvcc::LsmMvccInner;
-use crate::table::{SsTable, SsTableIterator};
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -173,7 +173,9 @@ impl Drop for MiniLsm {
 
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
-        unimplemented!()
+        let mut mutex = self.flush_thread.lock();
+        mutex.take().unwrap().join().ok();
+        Ok(())
     }
 
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
@@ -246,6 +248,33 @@ impl MiniLsm {
     }
 }
 
+fn range_overlap(
+    user_begin: Bound<&[u8]>,
+    user_end: Bound<&[u8]>,
+    table_begin: KeySlice,
+    table_end: KeySlice,
+) -> bool {
+    match user_end {
+        Bound::Excluded(key) if key <= table_begin.raw_ref() => {
+            return false;
+        }
+        Bound::Included(key) if key < table_begin.raw_ref() => {
+            return false;
+        }
+        _ => {}
+    }
+    match user_begin {
+        Bound::Excluded(key) if key >= table_end.raw_ref() => {
+            return false;
+        }
+        Bound::Included(key) if key > table_end.raw_ref() => {
+            return false;
+        }
+        _ => {}
+    }
+    true
+}
+
 fn key_within(user_key: &[u8], table_begin: KeySlice, table_end: KeySlice) -> bool {
     table_begin.raw_ref() <= user_key && user_key <= table_end.raw_ref()
 }
@@ -264,6 +293,12 @@ impl LsmStorageInner {
     /// not exist.
     pub(crate) fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Self> {
         let path = path.as_ref();
+
+        // Create directory if it doesn't exist
+        if !path.exists() {
+            std::fs::create_dir_all(path)?;
+        }
+
         let state = LsmStorageState::create(&options);
 
         let compaction_controller = match &options.compaction_options {
@@ -421,7 +456,29 @@ impl LsmStorageInner {
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
-        unimplemented!()
+        let _state_lock = self.state_lock.lock();
+        let imm_to_flush = {
+            let guard = self.state.read();
+            guard
+                .imm_memtables
+                .last()
+                .ok_or(anyhow!("imm memtable list is empty"))?
+                .clone()
+        };
+        let mut builder = SsTableBuilder::new(self.options.block_size);
+        imm_to_flush.flush(&mut builder)?;
+        let id = imm_to_flush.id();
+        let sst =
+            Arc::new(builder.build(id, Some(self.block_cache.clone()), self.path_of_sst(id))?);
+        {
+            let mut guard = self.state.write();
+            let mut snapshot = guard.deref().deref().clone();
+            snapshot.imm_memtables.pop();
+            snapshot.l0_sstables.insert(0, id);
+            snapshot.sstables.insert(id, sst);
+            *guard = Arc::new(snapshot);
+        }
+        Ok(())
     }
 
     pub fn new_txn(&self) -> Result<()> {
@@ -448,21 +505,30 @@ impl LsmStorageInner {
         let mut vec = Vec::new();
         for table_id in ss_iter {
             let table = snapshot.sstables[table_id].clone();
-            let iter = match lower {
-                Bound::Included(key) => {
-                    SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(key))?
-                }
-                Bound::Excluded(key) => {
-                    let mut iter =
-                        SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(key))?;
-                    if iter.is_valid() && iter.key().raw_ref() == key {
-                        iter.next()?;
+            if range_overlap(
+                lower,
+                upper,
+                table.first_key().as_key_slice(),
+                table.last_key().as_key_slice(),
+            ) {
+                let iter = match lower {
+                    Bound::Included(key) => {
+                        SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(key))?
                     }
-                    iter
-                }
-                Bound::Unbounded => SsTableIterator::create_and_seek_to_first(table)?,
-            };
-            vec.push(Box::new(iter));
+                    Bound::Excluded(key) => {
+                        let mut iter = SsTableIterator::create_and_seek_to_key(
+                            table,
+                            KeySlice::from_slice(key),
+                        )?;
+                        if iter.is_valid() && iter.key().raw_ref() == key {
+                            iter.next()?;
+                        }
+                        iter
+                    }
+                    Bound::Unbounded => SsTableIterator::create_and_seek_to_first(table)?,
+                };
+                vec.push(Box::new(iter));
+            }
         }
         let ss_iter = MergeIterator::create(vec);
         LsmIterator::new(
