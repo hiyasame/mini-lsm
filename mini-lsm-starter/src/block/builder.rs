@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use crate::key::{KeySlice, KeyVec};
 use bytes::BufMut;
 
@@ -30,6 +27,20 @@ pub struct BlockBuilder {
     block_size: usize,
     /// The first key in the block
     first_key: KeyVec,
+}
+
+fn compute_overlap(first_key: KeySlice, key: KeySlice) -> usize {
+    let mut i = 0;
+    loop {
+        if i >= first_key.len() || i >= key.len() {
+            break;
+        }
+        if first_key.raw_ref()[i] != key.raw_ref()[i] {
+            break;
+        }
+        i += 1;
+    }
+    i
 }
 
 impl BlockBuilder {
@@ -54,10 +65,22 @@ impl BlockBuilder {
             return false;
         }
         self.offsets.push(self.data.len() as u16);
-        self.data.put_u16(key.len() as u16);
-        self.data.put_slice(key.into_inner());
+        let overlap = compute_overlap(self.first_key.as_key_slice(), key);
+        // Encode key overlap.
+        self.data.put_u16(overlap as u16);
+        // Encode key length (excluding overlap).
+        self.data.put_u16((key.len() - overlap) as u16);
+        // Encode key content (excluding overlap).
+        self.data.put(&key.raw_ref()[overlap..]);
+        // Encode value length.
         self.data.put_u16(value.len() as u16);
+        // Encode value content.
         self.data.put_slice(value);
+
+        if self.first_key.is_empty() {
+            self.first_key = key.to_key_vec();
+        }
+
         true
     }
 

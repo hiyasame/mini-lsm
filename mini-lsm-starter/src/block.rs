@@ -29,6 +29,17 @@ pub struct Block {
 }
 
 impl Block {
+    pub(crate) fn get_first_key(&self) -> crate::key::KeyVec {
+        if self.data.is_empty() {
+            return crate::key::KeyVec::new();
+        }
+        let mut buf = &self.data[..];
+        buf.get_u16(); // skip overlap_len (should be 0 for first key)
+        let key_len = buf.get_u16();
+        let key = &buf[..key_len as usize];
+        crate::key::KeyVec::from_vec(key.to_vec())
+    }
+
     /// Encode the internal data to the data layout illustrated in the course
     /// Note: You may want to recheck if any of the expected field is missing from your output
     pub fn encode(&self) -> Bytes {

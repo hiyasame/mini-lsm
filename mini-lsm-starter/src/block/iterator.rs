@@ -16,7 +16,7 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use crate::key::{KeySlice, KeyVec};
-use bytes::Buf;
+use bytes::{Buf, BufMut};
 use std::sync::Arc;
 
 use super::Block;
@@ -38,11 +38,11 @@ pub struct BlockIterator {
 impl BlockIterator {
     fn new(block: Arc<Block>) -> Self {
         Self {
+            first_key: block.get_first_key(),
             block,
             key: KeyVec::new(),
             value_range: (0, 0),
             idx: 0,
-            first_key: KeyVec::new(),
         }
     }
 
@@ -117,13 +117,15 @@ impl BlockIterator {
         self.idx = idx;
         let offset = self.block.offsets[idx] as usize;
         let mut buf = &self.block.data[offset..];
+        let overlap_len = buf.get_u16() as usize;
         let key_len = buf.get_u16() as usize;
-        let key_buf = buf[..key_len].to_vec();
+        let mut key_buf = self.first_key.raw_ref()[..overlap_len].to_vec();
+        key_buf.put_slice(&buf[..key_len]);
         buf.advance(key_len);
         let value_len = buf.get_u16() as usize;
         let value_buf = buf[..value_len].to_vec();
         buf.advance(value_len);
         self.key = KeyVec::from_vec(key_buf);
-        self.value_range = (offset + key_len + 4, offset + key_len + value_len + 4);
+        self.value_range = (offset + key_len + 6, offset + key_len + value_len + 6);
     }
 }
