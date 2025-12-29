@@ -16,7 +16,6 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use super::StorageIterator;
-use crate::lsm_storage::CompactionFilter::Prefix;
 use anyhow::Result;
 
 /// Merges two iterators of different types into one. If the two iterators have the same key, only
@@ -24,7 +23,7 @@ use anyhow::Result;
 pub struct TwoMergeIterator<A: StorageIterator, B: StorageIterator> {
     a: A,
     b: B,
-    // Add fields as need
+    choose_a: bool,
 }
 
 impl<
@@ -33,12 +32,17 @@ impl<
 > TwoMergeIterator<A, B>
 {
     pub fn create(a: A, b: B) -> Result<Self> {
-        let mut sf = Self { a, b };
+        let mut sf = Self {
+            a,
+            b,
+            choose_a: false,
+        };
         sf.skip_b()?;
+        sf.choose_a = Self::choose_a_inner(&sf.a, &sf.b);
         Ok(sf)
     }
 
-    fn choose_a(a: &A, b: &B) -> bool {
+    fn choose_a_inner(a: &A, b: &B) -> bool {
         if !a.is_valid() {
             return false;
         }
@@ -64,7 +68,7 @@ impl<
     type KeyType<'a> = A::KeyType<'a>;
 
     fn key(&self) -> Self::KeyType<'_> {
-        if Self::choose_a(&self.a, &self.b) {
+        if self.choose_a {
             self.a.key()
         } else {
             self.b.key()
@@ -72,7 +76,7 @@ impl<
     }
 
     fn value(&self) -> &[u8] {
-        if Self::choose_a(&self.a, &self.b) {
+        if self.choose_a {
             self.a.value()
         } else {
             self.b.value()
@@ -80,16 +84,21 @@ impl<
     }
 
     fn is_valid(&self) -> bool {
-        self.a.is_valid() || self.b.is_valid()
+        if self.choose_a {
+            self.a.is_valid()
+        } else {
+            self.b.is_valid()
+        }
     }
 
     fn next(&mut self) -> Result<()> {
-        if Self::choose_a(&self.a, &self.b) {
+        if self.choose_a {
             self.a.next()?;
         } else {
             self.b.next()?;
         }
         self.skip_b()?;
+        self.choose_a = Self::choose_a_inner(&self.a, &self.b);
         Ok(())
     }
 
