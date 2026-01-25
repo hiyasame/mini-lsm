@@ -204,6 +204,13 @@ impl LsmStorageInner {
                 lower_level: _,
                 lower_level_sst_ids,
                 ..
+            })
+            | CompactionTask::Leveled(LeveledCompactionTask {
+                upper_level,
+                upper_level_sst_ids,
+                lower_level: _,
+                lower_level_sst_ids,
+                ..
             }) => match upper_level {
                 Some(_) => {
                     // L1+ to L2+ compaction: 使用 SstConcatIterator
@@ -242,10 +249,7 @@ impl LsmStorageInner {
                     )
                 }
             },
-            CompactionTask::Tiered(TieredCompactionTask {
-                tiers,
-                bottom_tier_included,
-            }) => {
+            CompactionTask::Tiered(TieredCompactionTask { tiers, .. }) => {
                 let mut iters = Vec::with_capacity(tiers.len());
                 for (_, tier_sst_ids) in tiers {
                     let mut ssts = Vec::with_capacity(tier_sst_ids.len());
@@ -259,6 +263,7 @@ impl LsmStorageInner {
                     task.compact_to_bottom_level(),
                 )
             }
+
             _ => unimplemented!(),
         }
     }
