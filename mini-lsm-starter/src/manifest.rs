@@ -15,11 +15,13 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
+use bytes::Buf;
 use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 
@@ -37,12 +39,42 @@ pub enum ManifestRecord {
 }
 
 impl Manifest {
-    pub fn create(_path: impl AsRef<Path>) -> Result<Self> {
-        unimplemented!()
+    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self {
+            file: Arc::new(Mutex::new(
+                OpenOptions::new()
+                    .read(true)
+                    .create_new(true)
+                    .write(true)
+                    .open(path)
+                    .context("failed to create manifest")?,
+            )),
+        })
     }
 
-    pub fn recover(_path: impl AsRef<Path>) -> Result<(Self, Vec<ManifestRecord>)> {
-        unimplemented!()
+    pub fn recover(path: impl AsRef<Path>) -> Result<(Self, Vec<ManifestRecord>)> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(path.as_ref())
+            .context("failed to recover manifest")?;
+        let mut buf = Vec::<u8>::new();
+        file.read_to_end(&mut buf)?;
+        let manifest = Self {
+            file: Arc::new(Mutex::new(file)),
+        };
+
+        let mut buf_ptr = buf.as_slice();
+        let mut records = Vec::new();
+        while buf_ptr.has_remaining() {
+            let len = buf_ptr.get_u64();
+            let slice = &buf_ptr[..len as usize];
+            let json = serde_json::from_slice::<ManifestRecord>(slice)?;
+            buf_ptr.advance(len as usize);
+            records.push(json);
+        }
+
+        Ok((manifest, records))
     }
 
     pub fn add_record(
@@ -53,7 +85,13 @@ impl Manifest {
         self.add_record_when_init(record)
     }
 
-    pub fn add_record_when_init(&self, _record: ManifestRecord) -> Result<()> {
-        unimplemented!()
+    pub fn add_record_when_init(&self, record: ManifestRecord) -> Result<()> {
+        let mut guard = self.file.lock();
+        let buf = serde_json::to_vec(&record)?;
+        guard.write_all(&(buf.len() as u64).to_be_bytes())?;
+        guard.write_all(&buf)?;
+        // 保证写入磁盘
+        guard.sync_all()?;
+        Ok(())
     }
 }
