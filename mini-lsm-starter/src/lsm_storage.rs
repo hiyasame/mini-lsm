@@ -555,8 +555,46 @@ impl LsmStorageInner {
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
-    pub fn write_batch<T: AsRef<[u8]>>(&self, _batch: &[WriteBatchRecord<T>]) -> Result<()> {
-        unimplemented!()
+    pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
+        for record in batch {
+            match record {
+                WriteBatchRecord::Del(key) => {
+                    let key = key.as_ref();
+                    assert!(!key.is_empty(), "key cannot be empty");
+                    let size;
+                    {
+                        let guard = self.state.read();
+                        guard.memtable.put(key, b"")?;
+                        size = guard.memtable.approximate_size();
+                    }
+                    if size >= self.options.target_sst_size {
+                        let state_lock = self.state_lock.lock();
+                        if size >= self.options.target_sst_size {
+                            self.force_freeze_memtable(&state_lock)?;
+                        }
+                    }
+                }
+                WriteBatchRecord::Put(key, value) => {
+                    let key = key.as_ref();
+                    let value = value.as_ref();
+                    assert!(!key.is_empty(), "key cannot be empty");
+                    assert!(!value.is_empty(), "value cannot be empty");
+                    let size;
+                    {
+                        let guard = self.state.read();
+                        guard.memtable.put(key, value)?;
+                        size = guard.memtable.approximate_size();
+                    }
+                    if size >= self.options.target_sst_size {
+                        let state_lock = self.state_lock.lock();
+                        if size >= self.options.target_sst_size {
+                            self.force_freeze_memtable(&state_lock)?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Put a key-value pair into the storage by writing into the current memtable.

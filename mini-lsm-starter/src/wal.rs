@@ -15,16 +15,17 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
-use anyhow::{Context, Result};
+use crate::key::KeySlice;
+use anyhow::{Context, Result, bail};
 use bytes::{Buf, BufMut, Bytes};
 use crossbeam_skiplist::SkipMap;
+use nom::AsBytes;
 use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
+use std::hash::Hasher;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
-
-use crate::key::KeySlice;
 
 pub struct Wal {
     file: Arc<Mutex<BufWriter<File>>>,
@@ -47,12 +48,21 @@ impl Wal {
         file.read_to_end(&mut buf)?;
         let mut buf = buf.as_slice();
         while buf.has_remaining() {
+            let mut hasher = crc32fast::Hasher::new();
             let key_len = buf.get_u16() as usize;
+            hasher.write(&(key_len as u16).to_be_bytes());
             let key = Bytes::copy_from_slice(&buf[..key_len]);
+            hasher.write(key.as_bytes());
             buf.advance(key_len);
             let value_len = buf.get_u16() as usize;
+            hasher.write(&(value_len as u16).to_be_bytes());
             let value = Bytes::copy_from_slice(&buf[..value_len]);
+            hasher.write(value.as_bytes());
             buf.advance(value_len);
+            let actual_hash = buf.get_u32();
+            if hasher.finish() as u32 != actual_hash {
+                bail!("WAL recovery: incorrect hash");
+            }
             skiplist.insert(key, value);
         }
 
@@ -68,6 +78,8 @@ impl Wal {
         buf.put_slice(key);
         buf.put_u16(value.len() as u16);
         buf.put_slice(value);
+        let checksum = crc32fast::hash(&buf);
+        buf.put_u32(checksum);
         guard.write_all(&buf)?;
         Ok(())
     }

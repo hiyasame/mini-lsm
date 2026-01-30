@@ -72,6 +72,10 @@ impl Manifest {
             let json = serde_json::from_slice::<ManifestRecord>(slice)?;
             buf_ptr.advance(len as usize);
             records.push(json);
+            let hash = buf_ptr.get_u32();
+            if crc32fast::hash(slice) != hash {
+                bail!("Manifest recovery: incorrect hash");
+            }
         }
 
         Ok((manifest, records))
@@ -90,6 +94,8 @@ impl Manifest {
         let buf = serde_json::to_vec(&record)?;
         guard.write_all(&(buf.len() as u64).to_be_bytes())?;
         guard.write_all(&buf)?;
+        let hash = crc32fast::hash(&buf);
+        guard.write_all(&hash.to_be_bytes())?;
         // 保证写入磁盘
         guard.sync_all()?;
         Ok(())

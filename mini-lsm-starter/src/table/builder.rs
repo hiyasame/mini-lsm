@@ -85,7 +85,9 @@ impl SsTableBuilder {
             first_key: KeyVec::from_vec(std::mem::take(&mut self.first_key)).into_key_bytes(),
             last_key: KeyVec::from_vec(std::mem::take(&mut self.last_key)).into_key_bytes(),
         });
-        self.data.extend_from_slice(&block);
+        let checksum = crc32fast::hash(&block);
+        self.data.extend(block);
+        self.data.put_u32(checksum);
     }
 
     /// Get the estimated size of the SSTable.

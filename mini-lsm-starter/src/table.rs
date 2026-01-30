@@ -23,7 +23,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 pub use builder::SsTableBuilder;
 use bytes::{Buf, BufMut};
 pub use iterator::SsTableIterator;
@@ -53,6 +53,24 @@ impl BlockMeta {
         #[allow(clippy::ptr_arg)] // remove this allow after you finish
         buf: &mut Vec<u8>,
     ) {
+        let mut estimated_size = std::mem::size_of::<u32>();
+        for meta in block_meta {
+            // The size of offset
+            estimated_size += std::mem::size_of::<u32>();
+            // The size of key length
+            estimated_size += std::mem::size_of::<u16>();
+            // The size of actual key
+            estimated_size += meta.first_key.len();
+            // The size of key length
+            estimated_size += std::mem::size_of::<u16>();
+            // The size of actual key
+            estimated_size += meta.last_key.len();
+        }
+        estimated_size += std::mem::size_of::<u32>();
+        // Reserve the space to improve performance, especially when the size of incoming data is
+        // large
+        buf.reserve(estimated_size);
+        let original_len = buf.len();
         buf.put_u32(block_meta.len() as u32);
         for meta in block_meta {
             buf.put_u32(meta.offset as u32);
@@ -61,28 +79,32 @@ impl BlockMeta {
             buf.put_u16(meta.last_key.len() as u16);
             buf.put_slice(meta.last_key.raw_ref());
         }
+        buf.put_u32(crc32fast::hash(&buf[original_len + 4..]));
+        assert_eq!(estimated_size, buf.len() - original_len);
     }
 
     /// Decode block meta from a buffer.
     pub fn decode_block_meta(mut buf: &[u8]) -> Vec<BlockMeta> {
-        let mut vec = Vec::new();
-        let len = buf.get_u32() as usize;
-        vec.reserve(len);
-        for _ in 0..len {
+        let mut block_meta = Vec::new();
+        let num = buf.get_u32() as usize;
+        let checksum = crc32fast::hash(&buf[..buf.remaining() - 4]);
+        for _ in 0..num {
             let offset = buf.get_u32() as usize;
             let first_key_len = buf.get_u16() as usize;
-            let first_key = buf[..first_key_len].to_vec();
-            buf.advance(first_key_len);
-            let last_key_len = buf.get_u16() as usize;
-            let last_key = buf[..last_key_len].to_vec();
-            buf.advance(last_key_len);
-            vec.push(BlockMeta {
+            let first_key = KeyBytes::from_bytes(buf.copy_to_bytes(first_key_len));
+            let last_key_len: usize = buf.get_u16() as usize;
+            let last_key = KeyBytes::from_bytes(buf.copy_to_bytes(last_key_len));
+            block_meta.push(BlockMeta {
                 offset,
-                first_key: KeyVec::from_vec(first_key).into_key_bytes(),
-                last_key: KeyVec::from_vec(last_key).into_key_bytes(),
+                first_key,
+                last_key,
             });
         }
-        vec
+        if buf.get_u32() != checksum {
+            panic!("meta checksum mismatched");
+        }
+
+        block_meta
     }
 }
 
@@ -190,15 +212,21 @@ impl SsTable {
 
     /// Read a block from the disk.
     pub fn read_block(&self, block_idx: usize) -> Result<Arc<Block>> {
-        let block_start = self.block_meta[block_idx].offset;
-        let block_end = if block_idx + 1 >= self.block_meta.len() {
-            self.block_meta_offset
-        } else {
-            self.block_meta[block_idx + 1].offset
-        };
-        let block_len = block_end - block_start;
-        let block_data = self.file.read(block_start as u64, block_len as u64)?;
-        Ok(Arc::new(Block::decode(&block_data)))
+        let offset = self.block_meta[block_idx].offset;
+        let offset_end = self
+            .block_meta
+            .get(block_idx + 1)
+            .map_or(self.block_meta_offset, |x| x.offset);
+        let block_len = offset_end - offset - 4;
+        let block_data_with_chksum: Vec<u8> = self
+            .file
+            .read(offset as u64, (offset_end - offset) as u64)?;
+        let block_data = &block_data_with_chksum[..block_len];
+        let checksum = (&block_data_with_chksum[block_len..]).get_u32();
+        if checksum != crc32fast::hash(block_data) {
+            bail!("block checksum mismatched");
+        }
+        Ok(Arc::new(Block::decode(block_data)))
     }
 
     /// Read a block from disk, with block cache. (Day 4)
