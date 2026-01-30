@@ -15,12 +15,12 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
-use anyhow::Result;
-use bytes::Bytes;
+use anyhow::{Context, Result};
+use bytes::{Buf, BufMut, Bytes};
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
-use std::fs::File;
-use std::io::BufWriter;
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -31,16 +31,45 @@ pub struct Wal {
 }
 
 impl Wal {
-    pub fn create(_path: impl AsRef<Path>) -> Result<Self> {
-        unimplemented!()
+    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self {
+            file: Arc::new(Mutex::new(BufWriter::new(File::create(path)?))),
+        })
     }
 
-    pub fn recover(_path: impl AsRef<Path>, _skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
-        unimplemented!()
+    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(path)
+            .context("failed to recover from WAL")?;
+        let mut buf: Vec<u8> = Vec::new();
+        file.read_to_end(&mut buf)?;
+        let mut buf = buf.as_slice();
+        while buf.has_remaining() {
+            let key_len = buf.get_u16() as usize;
+            let key = Bytes::copy_from_slice(&buf[..key_len]);
+            buf.advance(key_len);
+            let value_len = buf.get_u16() as usize;
+            let value = Bytes::copy_from_slice(&buf[..value_len]);
+            buf.advance(value_len);
+            skiplist.insert(key, value);
+        }
+
+        Ok(Self {
+            file: Arc::new(Mutex::new(BufWriter::new(file))),
+        })
     }
 
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let mut guard = self.file.lock();
+        let mut buf: Vec<u8> = Vec::new();
+        buf.put_u16(key.len() as u16);
+        buf.put_slice(key);
+        buf.put_u16(value.len() as u16);
+        buf.put_slice(value);
+        guard.write_all(&buf)?;
+        Ok(())
     }
 
     /// Implement this in week 3, day 5; if you want to implement this earlier, use `&[u8]` as the key type.
@@ -49,6 +78,9 @@ impl Wal {
     }
 
     pub fn sync(&self) -> Result<()> {
-        unimplemented!()
+        let mut guard = self.file.lock();
+        guard.flush()?;
+        guard.get_mut().sync_all()?;
+        Ok(())
     }
 }

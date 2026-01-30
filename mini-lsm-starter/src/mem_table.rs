@@ -17,13 +17,13 @@
 
 use std::ops::Bound;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use anyhow::Result;
 use bytes::Bytes;
-use crossbeam_skiplist::SkipMap;
 use crossbeam_skiplist::map::Entry;
+use crossbeam_skiplist::SkipMap;
 use ouroboros::self_referencing;
 
 use crate::iterators::StorageIterator;
@@ -63,13 +63,17 @@ impl MemTable {
     }
 
     /// Create a new mem-table with WAL
-    pub fn create_with_wal(_id: usize, _path: impl AsRef<Path>) -> Result<Self> {
-        unimplemented!()
+    pub fn create_with_wal(id: usize, path: impl AsRef<Path>) -> Result<Self> {
+        let mut sf = Self::create(id);
+        sf.wal = Some(Wal::create(path)?);
+        Ok(sf)
     }
 
     /// Create a memtable from WAL
-    pub fn recover_from_wal(_id: usize, _path: impl AsRef<Path>) -> Result<Self> {
-        unimplemented!()
+    pub fn recover_from_wal(id: usize, path: impl AsRef<Path>) -> Result<Self> {
+        let mut sf = Self::create(id);
+        sf.wal = Some(Wal::recover(path, &sf.map)?);
+        Ok(sf)
     }
 
     pub fn for_testing_put_slice(&self, key: &[u8], value: &[u8]) -> Result<()> {
@@ -102,10 +106,14 @@ impl MemTable {
     /// In week 2, day 6, also flush the data to WAL.
     /// In week 3, day 5, modify the function to use the batch API.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.approximate_size
-            .fetch_add(key.len() + value.len(), Ordering::Relaxed);
+        let estimated_size = key.len() + value.len();
         self.map
             .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
+        self.approximate_size
+            .fetch_add(estimated_size, Ordering::Relaxed);
+        if let Some(ref wal) = self.wal {
+            wal.put(key, value)?;
+        }
         Ok(())
     }
 
