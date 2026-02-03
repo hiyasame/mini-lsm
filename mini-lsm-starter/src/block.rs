@@ -37,7 +37,9 @@ impl Block {
         buf.get_u16(); // skip overlap_len (should be 0 for first key)
         let key_len = buf.get_u16();
         let key = &buf[..key_len as usize];
-        crate::key::KeyVec::from_vec(key.to_vec())
+        buf.advance(key_len as usize);
+        let ts = buf.get_u64();
+        crate::key::KeyVec::from_vec_with_ts(key.to_vec(), ts)
     }
 
     /// Encode the internal data to the data layout illustrated in the course

@@ -119,13 +119,15 @@ impl BlockIterator {
         let mut buf = &self.block.data[offset..];
         let overlap_len = buf.get_u16() as usize;
         let key_len = buf.get_u16() as usize;
-        let mut key_buf = self.first_key.raw_ref()[..overlap_len].to_vec();
+        let mut key_buf = self.first_key.key_ref()[..overlap_len].to_vec();
         key_buf.put_slice(&buf[..key_len]);
         buf.advance(key_len);
+        let key_ts = buf.get_u64();
         let value_len = buf.get_u16() as usize;
         let value_buf = buf[..value_len].to_vec();
         buf.advance(value_len);
-        self.key = KeyVec::from_vec(key_buf);
-        self.value_range = (offset + key_len + 6, offset + key_len + value_len + 6);
+        self.key = KeyVec::from_vec_with_ts(key_buf, key_ts);
+        // Format: overlap_len(2) + key_len(2) + key + ts(8) + value_len(2) + value
+        self.value_range = (offset + key_len + 14, offset + key_len + value_len + 14);
     }
 }

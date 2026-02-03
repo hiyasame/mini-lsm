@@ -28,8 +28,8 @@ use bytes::BufMut;
 /// Builds an SSTable from key-value pairs.
 pub struct SsTableBuilder {
     builder: BlockBuilder,
-    first_key: Vec<u8>,
-    last_key: Vec<u8>,
+    first_key: KeyVec,
+    last_key: KeyVec,
     data: Vec<u8>,
     pub(crate) meta: Vec<BlockMeta>,
     block_size: usize,
@@ -41,8 +41,8 @@ impl SsTableBuilder {
     pub fn new(block_size: usize) -> Self {
         Self {
             builder: BlockBuilder::new(block_size),
-            first_key: Vec::new(),
-            last_key: Vec::new(),
+            first_key: KeyVec::new(),
+            last_key: KeyVec::new(),
             data: Vec::new(),
             meta: Vec::new(),
             block_size,
@@ -56,15 +56,14 @@ impl SsTableBuilder {
     /// be helpful here)
     pub fn add(&mut self, key: KeySlice, value: &[u8]) {
         if self.first_key.is_empty() {
-            self.first_key.extend_from_slice(key.into_inner());
+            self.first_key.set_from_slice(key);
         }
 
         // Add key hash for bloom filter
-        self.key_hashes.push(farmhash::fingerprint32(key.raw_ref()));
+        self.key_hashes.push(farmhash::fingerprint32(key.key_ref()));
 
         if self.builder.add(key, value) {
-            self.last_key.clear();
-            self.last_key.extend_from_slice(key.into_inner());
+            self.last_key.set_from_slice(key);
             return;
         }
 
@@ -72,18 +71,19 @@ impl SsTableBuilder {
 
         // add the key-value pair to the next block
         assert!(self.builder.add(key, value));
-        self.first_key.extend_from_slice(key.into_inner());
-        self.last_key.extend_from_slice(key.into_inner());
+        self.first_key.set_from_slice(key);
+        self.last_key.set_from_slice(key);
     }
 
     fn finish_block(&mut self) {
         // 创建一个新的 block
         let builder = std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
         let block = builder.build().encode();
+
         self.meta.push(BlockMeta {
             offset: self.data.len(),
-            first_key: KeyVec::from_vec(std::mem::take(&mut self.first_key)).into_key_bytes(),
-            last_key: KeyVec::from_vec(std::mem::take(&mut self.last_key)).into_key_bytes(),
+            first_key: std::mem::take(&mut self.first_key).into_key_bytes(),
+            last_key: std::mem::take(&mut self.last_key).into_key_bytes(),
         });
         let checksum = crc32fast::hash(&block);
         self.data.extend(block);
