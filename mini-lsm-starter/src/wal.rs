@@ -15,7 +15,7 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
-use crate::key::KeySlice;
+use crate::key::{KeyBytes, KeySlice};
 use anyhow::{Context, Result, bail};
 use bytes::{Buf, BufMut, Bytes};
 use crossbeam_skiplist::SkipMap;
@@ -38,7 +38,7 @@ impl Wal {
         })
     }
 
-    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
+    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<KeyBytes, Bytes>) -> Result<Self> {
         let mut file = OpenOptions::new()
             .read(true)
             .append(true)
@@ -54,6 +54,8 @@ impl Wal {
             let key = Bytes::copy_from_slice(&buf[..key_len]);
             hasher.write(key.as_bytes());
             buf.advance(key_len);
+            let ts = buf.get_u64();
+            hasher.write(&ts.to_be_bytes());
             let value_len = buf.get_u16() as usize;
             hasher.write(&(value_len as u16).to_be_bytes());
             let value = Bytes::copy_from_slice(&buf[..value_len]);
@@ -63,7 +65,7 @@ impl Wal {
             if hasher.finish() as u32 != actual_hash {
                 bail!("WAL recovery: incorrect hash");
             }
-            skiplist.insert(key, value);
+            skiplist.insert(KeyBytes::from_bytes_with_ts(key, ts), value);
         }
 
         Ok(Self {
@@ -71,11 +73,12 @@ impl Wal {
         })
     }
 
-    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+    pub fn put(&self, key: KeySlice, value: &[u8]) -> Result<()> {
         let mut guard = self.file.lock();
         let mut buf: Vec<u8> = Vec::new();
-        buf.put_u16(key.len() as u16);
-        buf.put_slice(key);
+        buf.put_u16(key.key_len() as u16);
+        buf.put_slice(key.key_ref());
+        buf.put_u64(key.ts());
         buf.put_u16(value.len() as u16);
         buf.put_slice(value);
         let checksum = crc32fast::hash(&buf);
