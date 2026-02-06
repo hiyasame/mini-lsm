@@ -21,10 +21,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::compact::CompactionTask::ForceFullCompaction;
-use crate::iterators::StorageIterator;
 use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
+use crate::iterators::StorageIterator;
 use crate::key::KeySlice;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
 use crate::manifest::ManifestRecord;
@@ -134,7 +134,9 @@ impl LsmStorageInner {
     ) -> Result<Vec<Arc<SsTable>>> {
         let mut builder = None;
         let mut new_sst = Vec::new();
+        let watermark = self.mvcc().watermark();
         let mut last_key = Vec::<u8>::new();
+        let mut first_key_below_watermark = false;
 
         while iter.is_valid() {
             if builder.is_none() {
@@ -142,6 +144,31 @@ impl LsmStorageInner {
             }
 
             let same_as_last_key = iter.key().key_ref() == last_key;
+            if !same_as_last_key {
+                first_key_below_watermark = true;
+            }
+
+            // 如果 compact 到 bottom level，并且是新的 key，且是删除标记（空值），且在 watermark 以下，则跳过
+            if compact_to_bottom_level
+                && !same_as_last_key
+                && iter.key().ts() <= watermark
+                && iter.value().is_empty()
+            {
+                last_key.clear();
+                last_key.extend(iter.key().key_ref());
+                iter.next()?;
+                first_key_below_watermark = false;
+                continue;
+            }
+
+            // 对于 watermark 以下的版本，只保留第一个版本（最新的）
+            if iter.key().ts() <= watermark {
+                if !first_key_below_watermark {
+                    iter.next()?;
+                    continue;
+                }
+                first_key_below_watermark = false;
+            }
 
             let builder_inner = builder.as_mut().unwrap();
 
@@ -160,7 +187,6 @@ impl LsmStorageInner {
             }
 
             let builder_inner = builder.as_mut().unwrap();
-            // 保留所有版本的 key
             builder_inner.add(iter.key(), iter.value());
 
             if !same_as_last_key {

@@ -29,6 +29,7 @@ use ouroboros::self_referencing;
 use parking_lot::Mutex;
 
 use crate::mem_table::map_bound;
+use crate::mvcc::watermark::Watermark;
 use crate::{
     iterators::{StorageIterator, two_merge_iterator::TwoMergeIterator},
     lsm_iterator::{FusedIterator, LsmIterator},
@@ -102,7 +103,9 @@ impl Transaction {
 }
 
 impl Drop for Transaction {
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        self.inner.mvcc().ts.lock().1.remove_reader(self.read_ts)
+    }
 }
 
 type SkipMapRangeIter<'a> =
