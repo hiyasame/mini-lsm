@@ -15,19 +15,20 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
+use anyhow::Result;
+use bytes::Bytes;
+use bytes::buf::Writer;
+use crossbeam_skiplist::SkipMap;
+use crossbeam_skiplist::map::Entry;
+use ouroboros::self_referencing;
+use parking_lot::Mutex;
 use std::{
     collections::HashSet,
     ops::Bound,
     sync::{Arc, atomic::AtomicBool},
 };
 
-use anyhow::Result;
-use bytes::Bytes;
-use crossbeam_skiplist::SkipMap;
-use crossbeam_skiplist::map::Entry;
-use ouroboros::self_referencing;
-use parking_lot::Mutex;
-
+use crate::lsm_storage::WriteBatchRecord;
 use crate::mem_table::map_bound;
 use crate::mvcc::watermark::Watermark;
 use crate::{
@@ -90,15 +91,44 @@ impl Transaction {
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) {
-        unimplemented!()
+        use std::sync::atomic::Ordering;
+        if self.committed.load(Ordering::SeqCst) {
+            panic!("cannot operate on committed txn!");
+        }
+        self.local_storage
+            .insert(key.to_vec().into(), value.to_vec().into());
     }
 
     pub fn delete(&self, key: &[u8]) {
-        unimplemented!()
+        use std::sync::atomic::Ordering;
+        if self.committed.load(Ordering::SeqCst) {
+            panic!("cannot operate on committed txn!");
+        }
+        self.local_storage
+            .insert(key.to_vec().into(), vec![].into());
     }
 
     pub fn commit(&self) -> Result<()> {
-        unimplemented!()
+        use std::sync::atomic::Ordering;
+        self.committed
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .expect("cannot operate on committed txn!");
+        self.inner.write_batch(
+            &self
+                .local_storage
+                .iter()
+                .map(|entry| {
+                    let key = entry.key().clone();
+                    let value = entry.value().clone();
+                    if value.is_empty() {
+                        WriteBatchRecord::Del(key)
+                    } else {
+                        WriteBatchRecord::Put(key, value)
+                    }
+                })
+                .collect::<Vec<WriteBatchRecord<Bytes>>>(),
+        )?;
+        Ok(())
     }
 }
 
