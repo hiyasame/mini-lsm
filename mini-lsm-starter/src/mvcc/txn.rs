@@ -15,7 +15,7 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use bytes::Bytes;
 use bytes::buf::Writer;
 use crossbeam_skiplist::SkipMap;
@@ -30,6 +30,7 @@ use std::{
 
 use crate::lsm_storage::WriteBatchRecord;
 use crate::mem_table::map_bound;
+use crate::mvcc::CommittedTxnData;
 use crate::mvcc::watermark::Watermark;
 use crate::{
     iterators::{StorageIterator, two_merge_iterator::TwoMergeIterator},
@@ -97,6 +98,11 @@ impl Transaction {
         }
         self.local_storage
             .insert(key.to_vec().into(), value.to_vec().into());
+        if let Some(key_hashes) = &self.key_hashes {
+            let mut key_hashes = key_hashes.lock();
+            let (write_hashes, _) = &mut *key_hashes;
+            write_hashes.insert(farmhash::hash32(key));
+        }
     }
 
     pub fn delete(&self, key: &[u8]) {
@@ -106,6 +112,11 @@ impl Transaction {
         }
         self.local_storage
             .insert(key.to_vec().into(), vec![].into());
+        if let Some(key_hashes) = &self.key_hashes {
+            let mut key_hashes = key_hashes.lock();
+            let (write_hashes, _) = &mut *key_hashes;
+            write_hashes.insert(farmhash::hash32(key));
+        }
     }
 
     pub fn commit(&self) -> Result<()> {
@@ -113,21 +124,67 @@ impl Transaction {
         self.committed
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .expect("cannot operate on committed txn!");
-        self.inner.write_batch(
+        let _commit_lock = self.inner.mvcc().commit_lock.lock();
+        let serializability_check = matches!(&self.key_hashes, Some(guard));
+        if let Some(guard) = &self.key_hashes {
+            let mut guard = guard.lock();
+            let (write_set, read_set) = &*guard;
+            println!(
+                "commit txn: write_set: {:?}, read_set: {:?}",
+                write_set, read_set
+            );
+            if !write_set.is_empty() {
+                let committed_txns = self.inner.mvcc().committed_txns.lock();
+                for (_, txn_data) in committed_txns.range((self.read_ts + 1)..) {
+                    for key_hash in read_set {
+                        if txn_data.key_hashes.contains(key_hash) {
+                            bail!("serializable check failed");
+                        }
+                    }
+                }
+            }
+        }
+        let ts = self.inner.write_batch_inner(
             &self
                 .local_storage
                 .iter()
                 .map(|entry| {
-                    let key = entry.key().clone();
-                    let value = entry.value().clone();
+                    let key = entry.key();
+                    let value = entry.value();
                     if value.is_empty() {
-                        WriteBatchRecord::Del(key)
+                        WriteBatchRecord::Del(key.clone())
                     } else {
-                        WriteBatchRecord::Put(key, value)
+                        WriteBatchRecord::Put(key.clone(), value.clone())
                     }
                 })
                 .collect::<Vec<WriteBatchRecord<Bytes>>>(),
         )?;
+        if serializability_check {
+            let mut committed_txns = self.inner.mvcc().committed_txns.lock();
+            let mut key_hashes = self.key_hashes.as_ref().unwrap().lock();
+            let (write_set, _) = &mut *key_hashes;
+
+            let old_data = committed_txns.insert(
+                ts,
+                CommittedTxnData {
+                    key_hashes: std::mem::take(write_set),
+                    read_ts: self.read_ts,
+                    commit_ts: ts,
+                },
+            );
+            assert!(old_data.is_none());
+
+            // remove unneeded txn data
+            let watermark = self.inner.mvcc().watermark();
+            while let Some(entry) = committed_txns.first_entry() {
+                if *entry.key() < watermark {
+                    entry.remove();
+                } else {
+                    break;
+                }
+            }
+        }
+
         Ok(())
     }
 }

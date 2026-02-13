@@ -23,7 +23,7 @@ use nom::AsBytes;
 use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
 use std::hash::Hasher;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
